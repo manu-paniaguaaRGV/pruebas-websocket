@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LangGraph SSE Streamer</title>
+    <!-- Carga de Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Define la fuente Inter */
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f3f4f6;
+        }
+        /* Estilos personalizados para el área de registro (log) */
+        #log-area {
+            height: 50vh;
+            max-height: 500px;
+            overflow-y: auto;
+            border: 1px solid #e5e7eb;
+            background-color: #ffffff;
+            /* Invertir el orden para que los nuevos mensajes aparezcan arriba (como un chat) */
+            display: flex;
+            flex-direction: column-reverse;
+        }
+        .log-message {
+            padding: 12px 16px;
+            border-bottom: 1px solid #eff6ff;
+            font-size: 0.95rem;
+            line-height: 1.4;
+        }
+        .log-message:first-child {
+            border-bottom: none;
+        }
+        .log-message:nth-child(even) {
+            background-color: #f9fafb;
+        }
+    </style>
+</head>
+<body class="p-4 md:p-8">
+
+<div class="container mx-auto max-w-2xl bg-white p-6 md:p-8 rounded-xl shadow-2xl">
+    <h1 class="text-3xl font-extrabold mb-4 text-indigo-700 border-b pb-2">
+        Agente LangGraph con Transmisión en Vivo
+    </h1>
+    <p class="mb-6 text-gray-600">
+        Conéctate al agente. Cada mensaje del LangGraph se envía en tiempo real vía Server-Sent Events (SSE).
+    </p>
+
+    <!-- Caja de Estado -->
+    <div id="status-box" class="p-4 mb-6 rounded-lg text-sm font-semibold transition-all duration-300 bg-blue-100 text-blue-800 shadow-md">
+        Estado: Listo. Ejecuta el servidor Python (`main.py`) y presiona "Iniciar".
+    </div>
+
+    <!-- Área de Registro (Log) -->
+    <div id="log-area" class="rounded-xl shadow-inner mb-6">
+        <div id="initial-message" class="p-4 text-center text-gray-400 text-sm">-- El log de pasos del agente aparecerá aquí --</div>
+    </div>
+
+    <!-- Formulario de Entrada -->
+    <form id="agent-form" class="flex flex-col space-y-4">
+        <textarea id="prompt-input" rows="3" placeholder="Ejemplo: 'Por favor, simula un análisis de datos complejos.' O 'Solo saluda.'"
+                  class="w-full p-4 border border-gray-300 rounded-lg focus:ring-4 focus:ring-indigo-500 transition resize-none text-gray-700"></textarea>
+        <button type="submit" id="submit-button"
+                class="bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold py-3 px-6 rounded-lg transition duration-150 ease-in-out shadow-xl disabled:bg-gray-400 disabled:shadow-none">
+            Iniciar Agente y Transmitir Pasos
+        </button>
+    </form>
+</div>
+
+<script>
+    const form = document.getElementById('agent-form');
+    const promptInput = document.getElementById('prompt-input');
+    const logArea = document.getElementById('log-area');
+    const submitButton = document.getElementById('submit-button');
+    const statusBox = document.getElementById('status-box');
+    let eventSource = null;
+
+    // Determina la URL base. Asume que FastAPI se ejecuta en el mismo host/puerto (ej. http://localhost:8000)
+    //const API_URL = window.location.origin;
+    const API_URL = "http://127.0.0.1:8000"
+    console.log('API_URL:', API_URL);
+
+    /**
+     * Actualiza la caja de estado con un mensaje y estilo.
+     */
+    function updateStatus(message, type = 'info') {
+        statusBox.textContent = `Estado: ${message}`;
+        statusBox.className = 'p-4 mb-6 rounded-lg text-sm font-semibold transition-all duration-300 shadow-md';
+
+        switch (type) {
+            case 'success':
+                statusBox.classList.add('bg-green-100', 'text-green-800');
+                break;
+            case 'error':
+                statusBox.classList.add('bg-red-100', 'text-red-800');
+                break;
+            case 'info':
+            default:
+                statusBox.classList.add('bg-blue-100', 'text-blue-800');
+                break;
+        }
+    }
+
+    /**
+     * Agrega un nuevo mensaje al área de log.
+     */
+    function appendMessage(content) {
+        // Eliminar el mensaje inicial si existe
+        const initialMessage = document.getElementById('initial-message');
+        if (initialMessage) {
+            initialMessage.remove();
+        }
+
+        const messageDiv = document.createElement('div');
+        messageDiv.className = 'log-message whitespace-pre-wrap';
+        // Usar innerHTML para permitir formato básico (como **negrita**)
+        messageDiv.innerHTML = content; 
+        logArea.prepend(messageDiv); // Nuevo mensaje al inicio (parte superior)
+        // Scroll to the bottom of the log area (or top, since we prepend)
+        // Since we prepend, we don't need to scroll.
+    }
+
+    form.addEventListener('submit', function(e) {
+        e.preventDefault();
+
+        // 1. Manejo de conexión existente
+        if (eventSource && eventSource.readyState !== EventSource.CLOSED) {
+            updateStatus('ERROR: Una transmisión ya está activa. Por favor, espera a que finalice.', 'error');
+            return;
+        }
+
+        const prompt = promptInput.value.trim();
+        if (!prompt) {
+            updateStatus('Por favor, introduce una instrucción para el agente.', 'error');
+            return;
+        }
+
+        // 2. Preparación de la UI
+        logArea.innerHTML = '';
+        appendMessage(`> **PROMPT ENVIADO:** ${prompt}`);
+
+        submitButton.disabled = true;
+        updateStatus('Conectando al servidor y preparando el agente...', 'info');
+
+        try {
+            // Codificar el prompt para pasarlo en la URL
+            const encodedPrompt = encodeURIComponent(prompt);
+            const streamUrl = `${API_URL}/stream?prompt=${encodedPrompt}`;
+
+            // 3. Crear el EventSource
+            eventSource = new EventSource(streamUrl);
+            
+            // 4. Manejar mensajes entrantes (cada paso del LangGraph)
+            eventSource.onmessage = function(event) {
+                const data = event.data;
+                console.log("Recibido paso del agente:", data);
+                
+                // Un mensaje de 'FIN DEL STREAM' es una señal de cierre limpio
+                if (data.includes('--- FIN DEL STREAM ---')) {
+                    eventSource.close();
+                    updateStatus('Transmisión finalizada correctamente.', 'success');
+                    submitButton.disabled = false;
+                } else if (data) {
+                    appendMessage(data);
+                }
+            };
+
+            // 5. Manejar la apertura de la conexión
+            eventSource.onopen = function() {
+                 updateStatus('Transmisión activa. Esperando los primeros pasos del agente...', 'info');
+            };
+
+            // 6. Manejar errores
+            eventSource.onerror = function(err) {
+                console.error("EventSource falló:", err);
+                
+                // Si el estado es CERRADO (4), es un cierre normal o un error de conexión inicial
+                if (eventSource.readyState === EventSource.CLOSED) {
+                    // Si ya se ha recibido el mensaje de FIN, no hay error.
+                    // Si se cierra antes del FIN, es un error.
+                    if (submitButton.disabled) { // Si el botón está deshabilitado, es que estábamos en medio del proceso
+                         updateStatus('¡Error de conexión! El streaming se detuvo inesperadamente. ¿Está corriendo el servidor?', 'error');
+                    }
+                } else {
+                    // Error de tiempo de espera (timeout) o error de red
+                    updateStatus('Error de red durante la transmisión. Inténtalo de nuevo.', 'error');
+                }
+
+                submitButton.disabled = false;
+                eventSource.close();
+            };
+
+        } catch (error) {
+            console.error("Error al crear EventSource:", error);
+            updateStatus('Error fatal al intentar conectar con el servidor.', 'error');
+            submitButton.disabled = false;
+            if (eventSource) eventSource.close();
+        }
+    });
+</script>
+
+</body>
+</html>
